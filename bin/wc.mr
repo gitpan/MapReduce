@@ -1,0 +1,46 @@
+#!perl -w
+use strict;
+
+
+package WordCount;
+
+use lib "MapReduce/lib";
+use MapReduce;
+our @ISA = qw( MapReduce );
+
+WordCount->run(@ARGV);
+
+
+
+###########
+
+
+# Reads one line in per record
+sub Reader {
+  my $fh = shift;
+
+  sub {
+    my $record = <$fh>;
+    return () unless defined $record;
+    return \$record;
+  }
+}
+
+
+# returns a flat list with key/value pairs eg (word => 1, word2 => 1, ...)
+sub Map {
+
+  return map { $_ => 1 } split /\W+/, ${ $_[0] };
+}
+
+
+# returns a single key/value pair, reduced from an iterator of values.
+sub Reduce {
+  my ($key, $iter) = @_;
+  my $val;
+  while( defined (my $next = $iter->()) ){
+    $val += $next->[0];
+  }
+  return $key, $val;
+}
+

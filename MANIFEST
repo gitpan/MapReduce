@@ -1,0 +1,12 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+bin/mr
+bin/wc.mr
+t/MapReduce.t
+t/odyssey/odyssey.txt.gz
+lib/MapReduce.pm
+mapreduce-sample.conf
+test.conf
+META.yml                                 Module meta-data (added by MakeMaker)

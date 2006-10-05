@@ -1,0 +1,214 @@
+#!perl -w
+use strict;
+use Getopt::Long;
+
+# Master executable for perl MapReduce. This calls and monitors
+# map tasks and reduce tasks on all participating machines.
+
+my $usage = "
+usage: mr [opts] task.mr input-corpus output-corpus
+       mr [ -help | -cmd=cmd ]
+
+opts: conf=file, hosts=hostname, repository=dir
+";
+
+
+# Map: 
+# - partition input into N files/host
+# - Swap parts between hosts. All files k -> kth host
+# Reduce:
+# - Sort swapped files by partition key to one file / host
+# - Reduce task produces output files
+
+
+
+my %opts = (
+  "conf=s" => ar("/etc/mapreduce.conf"),
+
+  "hosts=s@"     => ar(0),
+  "repository=s" => ar('/tmp/mr'),
+  
+#  "maps=i"       => ar(1), # num of processes per machine
+#  "reduces=i"    => ar(1), #
+
+  "cmd=s"         => ar(''), # execute this command on all hosts
+
+  "help"          => ar(0),  # print help message
+);
+ 
+
+my %conf = getconf(%opts);
+
+if($conf{help}->[0]){
+  print $usage;
+  exit;
+}
+
+$conf{hosts} = $conf{hosts}->[0] 
+  if ref $conf{hosts}->[0]; # hack, fix later
+
+if( $conf{cmd}->[0] ){
+  poolcommand(\%conf);
+  exit;
+}
+
+my $repository = $conf{repository}->[0];
+
+my($taskfile, $corpus, $result) = @ARGV;
+die $usage unless @ARGV == 3;
+die "Can't find taskfile $taskfile\n" unless -f $taskfile;
+
+my ($taskfilename) = ($taskfile =~ m|/([^/]+)$|);
+
+
+
+# distribute the map and reduce code to all hosts
+system "scp $taskfile $_:/tmp/$taskfilename" for @{ $conf{hosts} };
+
+# execute map tasks
+spawn_tasks( "map", $conf{hosts}, $taskfilename, 
+             $repository, $corpus, $result, '' );
+
+
+spawn_tasks( "reduce", $conf{hosts}, $taskfilename, 
+             $repository, $corpus, $result, '' );
+exit;
+
+
+
+
+
+
+
+
+
+
+
+sub spawn_tasks {
+		
+  my ($task, $hosts, $taskfilename, 
+      $repository, $corpus, $result, $perlopts ) = @_;
+
+  my $start = time;
+  my %minions = ();
+  for my $k ( 0 .. @$hosts - 1 ) {
+    my $host = $hosts->[$k];
+    my $pid  =
+      spawn_task( $task, $hosts, $k, $taskfilename, 
+                  $repository, $corpus, $result, $perlopts );
+
+    $minions{$pid} = $host;
+    print STDERR "spawned $task task on $k th host ($host)\n";
+  }
+
+  print STDERR scalar keys %minions, " $task monkeys left: ",
+    join( ", ", values %minions ), "\n";
+
+  while ( my $reaped = wait ) {
+    last if $reaped == -1;
+    delete $minions{$reaped};
+    print STDERR scalar keys %minions, " $task monkeys left: ",
+      join( ", ", values %minions ), "\n";
+  }
+
+  print STDERR "Finished $task task in ", time - $start, " seconds\n";
+
+}
+
+
+
+sub spawn_task {
+  my ( $task, $hosts, $k, $taskfile, 
+       $repository, $corpus, $result, $perlopts ) = @_;
+
+  my $pid;
+  return $pid if ($pid = fork); # spawn and hand back child id
+
+  my $host = $hosts->[$k];
+  $hosts = join(" ", @$hosts);
+
+  my $start = time;
+  open REMOTE, 
+    "ssh $host 'perl $perlopts /tmp/$taskfile $task $repository $corpus $result $k $hosts' |";
+  open LOG, ">$host-log";
+  while(<REMOTE>){
+    print STDERR;
+    print LOG;
+  }
+  print STDERR "$host finished $task task in ", time - $start, " seconds\n";
+  
+  exit;
+}
+
+
+
+sub poolcommand {
+  my %conf = %{ $_[0] };
+  my $cmd = $conf{cmd}->[0];
+  for my $host ( @{ $conf{hosts} } ){
+    print STDERR "$host: $cmd\n";
+    system "ssh $host $cmd";
+  }
+}
+
+
+
+
+
+# CONFIG
+
+# Make an anonymous variable reference.
+# This is necessary to abide by the Getopt::Long way.
+sub ar {
+  my $var = shift;
+  return \$var;
+}
+
+# Get all configuration info, with precedence given to cmdline
+sub getconf {
+  my %opts = @_;  
+
+  GetOptions( %opts );
+  
+  my %cmdline = 
+    map { (split '=', $_)[0] => [ ${$opts{$_}} ] } 
+    grep { ${$opts{$_}} } 
+    keys %opts;
+  
+  # Read in config file and overrwrite with cmd line options
+  my %conf = readconf( @{$cmdline{conf}} );
+  $conf{$_} = $cmdline{$_} for keys %cmdline;
+
+  return %conf;
+}
+
+
+sub readconf {
+  my $fname = shift;
+  return () unless -e $fname; 
+  my @c     = ();
+  open F, "<$fname";
+  while (<F>) {
+    chomp;
+    s/\r//;
+    next unless $_;
+    next if /^#/;
+    push @c, [ split /\t+/ ];
+  }
+  my %conf = ();
+  for my $list (@c) {
+    if ( @$list > 2 ) {    # this is a vector
+      push @{ $conf{ shift @$list } }, [@$list];
+    }
+    else {                 # this is a single key/value
+      push @{ $conf{ $list->[0] } }, $list->[1];
+    }
+  }
+  return %conf;
+}
+
+
+
+
+
+
