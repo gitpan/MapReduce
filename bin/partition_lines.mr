@@ -1,0 +1,35 @@
+#!perl -w
+use strict;
+
+package PartitionLines;
+
+use lib "MapReduce/lib";
+use MapReduce;
+our @ISA = qw( MapReduce );
+
+PartitionLines->run(@ARGV);
+
+
+
+###########
+# no Reader() necessary, uses the default line separator
+
+# Returns a random number as key
+sub Map {
+  my $ref = shift;
+  my ( $key ) = int rand 100;
+  return ( $key, $$ref );
+}
+
+# Reduce is almost a no-op; just removes the random key
+# 
+sub Reduce {
+  my ($key, $iter) = @_;
+  my @lines;
+  while( defined (my $next = $iter->()) ){
+    push @lines, join("\t", @$next);
+  }
+  return (join "\n", @lines);
+}
+
+

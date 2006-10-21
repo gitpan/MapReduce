@@ -1,4 +1,4 @@
-#!perl -w
+#!/usr/bin/perl -w
 use strict;
 use Getopt::Long;
 
@@ -7,7 +7,7 @@ use Getopt::Long;
 
 my $usage = "
 usage: mr [opts] task.mr input-corpus output-corpus
-       mr [ -help | -cmd=cmd ]
+       mr [ -help | -cmd=cmd | -gather corpus resultdir ]
 
 opts: conf=file, hosts=hostname, repository=dir
 ";
@@ -23,17 +23,17 @@ opts: conf=file, hosts=hostname, repository=dir
 
 
 my %opts = (
-  "conf=s" => ar("/etc/mapreduce.conf"),
-
+  "conf=s"       => ar("/etc/mapreduce.conf"),
+  "master=s"     => ar(''),
+  "R=i"          => ar(0),
   "hosts=s@"     => ar(0),
-  "repository=s" => ar('/tmp/mr'),
-  
-#  "maps=i"       => ar(1), # num of processes per machine
-#  "reduces=i"    => ar(1), #
-
-  "cmd=s"         => ar(''), # execute this command on all hosts
-
-  "help"          => ar(0),  # print help message
+  "repository=s" => ar(''),
+  "maps=i"       => ar(0), # num of map procs per machine
+  "reduces=i"    => ar(0), # num of reduce procs per machine
+  "replicate=i"  => ar(0),  # f-way replication
+  "cmd=s"        => ar(''), # execute this command on all hosts
+  "gather"       => ar(0),
+  "help"         => ar(0),  # print help message
 );
  
 
@@ -52,7 +52,13 @@ if( $conf{cmd}->[0] ){
   exit;
 }
 
+if( $conf{gather}->[0] ){
+  gather(\%conf, @ARGV);
+  exit;
+}
+
 my $repository = $conf{repository}->[0];
+my $R = $conf{R}->[0] || @{ $conf{hosts} };
 
 my($taskfile, $corpus, $result) = @ARGV;
 die $usage unless @ARGV == 3;
@@ -62,16 +68,29 @@ my ($taskfilename) = ($taskfile =~ m|/([^/]+)$|);
 
 
 
-# distribute the map and reduce code to all hosts
-system "scp $taskfile $_:/tmp/$taskfilename" for @{ $conf{hosts} };
+# distribute the code to all hosts
+system "scp $taskfile $_:/tmp/$taskfilename" 
+  for @{ $conf{hosts} };
+
+print STDERR "preparing status dirs and gathering file manifest\n";
+
+my @reposfiles =
+  prepare_job( $repository, $corpus, $result, $R, $conf{hosts} );
+
+print STDERR "executing $taskfilename on ", 
+              scalar @reposfiles, " files\n";
 
 # execute map tasks
-spawn_tasks( "map", $conf{hosts}, $taskfilename, 
-             $repository, $corpus, $result, '' );
+spawn_tasks( "map", $conf{master}->[0], $conf{hosts}, 
+             $conf{replicate}->[0], $conf{maps}->[0], $R,
+             $taskfilename, $repository, 
+             $corpus, $result, '' );
 
 
-spawn_tasks( "reduce", $conf{hosts}, $taskfilename, 
-             $repository, $corpus, $result, '' );
+spawn_tasks( "reduce", $conf{master}->[0], $conf{hosts}, 
+             $conf{replicate}->[0], $conf{reduces}->[0], $R,
+			 $taskfilename, $repository, 
+             $corpus, $result, '' );
 exit;
 
 
@@ -86,7 +105,7 @@ exit;
 
 sub spawn_tasks {
 		
-  my ($task, $hosts, $taskfilename, 
+  my ($task, $master, $hosts, $fway, $procs, $R, $taskfilename, 
       $repository, $corpus, $result, $perlopts ) = @_;
 
   my $start = time;
@@ -94,7 +113,7 @@ sub spawn_tasks {
   for my $k ( 0 .. @$hosts - 1 ) {
     my $host = $hosts->[$k];
     my $pid  =
-      spawn_task( $task, $hosts, $k, $taskfilename, 
+      spawn_task( $task, $master, $hosts, $k, $fway, $procs, $R, $taskfilename, 
                   $repository, $corpus, $result, $perlopts );
 
     $minions{$pid} = $host;
@@ -118,7 +137,7 @@ sub spawn_tasks {
 
 
 sub spawn_task {
-  my ( $task, $hosts, $k, $taskfile, 
+  my ( $task, $master, $hosts, $k, $fway, $procs, $R, $taskfile,
        $repository, $corpus, $result, $perlopts ) = @_;
 
   my $pid;
@@ -126,14 +145,14 @@ sub spawn_task {
 
   my $host = $hosts->[$k];
   $hosts = join(" ", @$hosts);
+  my $cmd = join " ", 
+    qq{ perl $perlopts /tmp/$taskfile $task $master $repository $corpus $result $k $fway $procs $R $hosts };
 
   my $start = time;
-  open REMOTE, 
-    "ssh $host 'perl $perlopts /tmp/$taskfile $task $repository $corpus $result $k $hosts' |";
-  open LOG, ">$host-log";
+  print STDERR "$host: $cmd\n";
+  open REMOTE, "ssh $host '$cmd' |";
   while(<REMOTE>){
     print STDERR;
-    print LOG;
   }
   print STDERR "$host finished $task task in ", time - $start, " seconds\n";
   
@@ -147,9 +166,53 @@ sub poolcommand {
   my $cmd = $conf{cmd}->[0];
   for my $host ( @{ $conf{hosts} } ){
     print STDERR "$host: $cmd\n";
-    system "ssh $host $cmd";
+    system "ssh $host '$cmd'";
   }
 }
+
+
+sub gather {
+  my %conf = %{ $_[0] };
+  my($corpus, $result) = @_[1,2];
+  my $repos = $conf{repository}->[0];
+  mkdir $result unless -d $result;
+  for my $host ( @{ $conf{hosts} } ){
+    print STDERR "$host: gathering $corpus to $result\n";
+    system "scp $host:$repos/$corpus/* $result/.";
+  }
+}
+
+
+sub prepare_job {
+  my( $repository, $corpus, $result, $R, $hosts ) = @_;
+
+  system "rm -rf $repository/$result/.status";
+  mkdir "$repository/$result";
+  mkdir "$repository/$result/.status";
+  mkdir "$repository/$result/.status/map";
+  mkdir "$repository/$result/.status/reduce";
+  mkdir "$repository/$result/.status/machine";
+
+  my %files;
+  for my $host (@$hosts){
+    open LS, "ssh $host ls $repository/$corpus | cat |";
+    while(<LS>){
+      chomp;
+      next unless $_;
+      $files{$_} = 1;
+      system "touch $repository/$result/.status/map/$_.unprocessed";
+    }
+    close LS;
+  }
+
+  for my $i (0..$R-1){
+    system "touch $repository/$result/.status/reduce/$i.unprocessed";
+  }
+
+  return keys %files;
+}
+
+
 
 
 
@@ -209,6 +272,15 @@ sub readconf {
 
 
 
+__END__
+
+
+=head1 mr - a MapReduce front end
+
+
+This is part of the Perl implementation of the MapReduce distributed processing model.
+
+Please use "perldoc MapReduce" for instructions.
 
 
 

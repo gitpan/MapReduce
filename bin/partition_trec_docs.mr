@@ -1,0 +1,35 @@
+#!perl -w
+use strict;
+
+package Partitioner;
+
+use lib "MapReduce/lib";
+use MapReduce;
+our @ISA = qw( MapReduce );
+
+Partitioner->run(@ARGV);
+
+
+
+##########
+
+# Reads in one trec format document per record.
+sub Reader {
+  my $fh = shift;
+
+  local $/ = "</DOC>";
+  my $record = <$fh>;
+  return undef unless defined $record;
+  return \$record;
+}
+
+# Returns the doc id mapped to the original record
+sub Map {
+  return () unless defined ${ $_[0] };
+  my ( $key ) = ( ${ $_[0] } =~ /<DOCNO>(.+?)<\/DOCNO>/ );
+  return () unless defined $key;
+  return ($key, ${ $_[0] });
+}
+
+
+

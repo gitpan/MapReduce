@@ -4,9 +4,11 @@ MANIFEST
 README
 bin/mr
 bin/wc.mr
+bin/partition_lines.mr
+bin/partition_trec_docs.mr
 t/MapReduce.t
 t/odyssey/odyssey.txt.gz
+t/od-wc.txt
 lib/MapReduce.pm
-mapreduce-sample.conf
 test.conf
 META.yml                                 Module meta-data (added by MakeMaker)

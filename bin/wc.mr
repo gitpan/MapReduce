@@ -18,12 +18,10 @@ WordCount->run(@ARGV);
 # Reads one line in per record
 sub Reader {
   my $fh = shift;
-
-  sub {
-    my $record = <$fh>;
-    return () unless defined $record;
-    return \$record;
-  }
+  
+  my $record = <$fh>;
+  return () unless defined $record;
+  return \$record;
 }
 
 
@@ -41,6 +39,7 @@ sub Reduce {
   while( defined (my $next = $iter->()) ){
     $val += $next->[0];
   }
+  return undef unless defined $val;
   return $key, $val;
 }
 
